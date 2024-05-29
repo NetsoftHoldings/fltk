@@ -461,19 +461,12 @@ int Fl_Screen_Driver::scale_handler(int event)
 // use the startup time scaling value
 void Fl_Screen_Driver::use_startup_scale_factor()
 {
-  float factor;
-  char *p = 0;
+  char *p;
+  desktop_scale_factor();
   if ((p = fl_getenv("FLTK_SCALING_FACTOR"))) {
+    float factor = 1;
     sscanf(p, "%f", &factor);
-    // checks to prevent potential crash (factor <= 0) or very large factors
-    if (factor < 0.25) factor = 0.25;
-    else if (factor > 10.0) factor = 10.0;
-  }
-  else {
-    factor = desktop_scale_factor();
-  }
-  if (factor) {
-    for (int i = 0; i < screen_count(); i++)  scale(i, factor);
+    for (int i = 0; i < screen_count(); i++)  scale(i, factor * scale(i));
   }
 }
 
@@ -484,7 +477,6 @@ void Fl_Screen_Driver::open_display()
   static bool been_here = false;
   if (!been_here) {
     been_here = true;
-    screen_count(); // initialize, but ignore return value
     if (rescalable()) {
       use_startup_scale_factor();
       Fl::add_handler(Fl_Screen_Driver::scale_handler);

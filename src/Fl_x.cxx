@@ -1220,6 +1220,77 @@ static KeySym fl_KeycodeToKeysym(Display *d, KeyCode k, unsigned i) {
   return XKeycodeToKeysym(d, k, i);
 }
 
+#if USE_XRANDR
+static void react_to_screen_reconfiguration() {
+#if USE_XFT
+  // memorize previous screen sizes and scales
+  int old_count = Fl::screen_count();
+  int (*sizes)[4] =  new int[old_count][4];
+  float *scales = new float[old_count];
+  for (int screen = 0; screen < old_count; screen++) {
+    Fl::screen_xywh(sizes[screen][0], sizes[screen][1], sizes[screen][2], sizes[screen][3], screen);
+    scales[screen] = Fl::screen_driver()->scale(screen);
+  }
+#endif // USE_XFT
+  Fl::call_screen_init(); // compute new screen sizes
+#if USE_XFT
+  // detect whether screen sizes were unchanged
+  bool nochange = (old_count == Fl::screen_count());
+  if (nochange) {
+    for (int screen = 0; screen < old_count; screen++) {
+      int X,Y,W,H;
+      Fl::screen_xywh(X,Y,W,H, screen);
+      X /= scales[screen];
+      Y /= scales[screen];
+      W /= scales[screen];
+      H /= scales[screen];
+      if (X != sizes[screen][0] || Y != sizes[screen][1] || W != sizes[screen][2] || H != sizes[screen][3]) {
+        nochange = false;
+        break;
+      }
+    }
+  }
+  delete[] sizes;
+  if (nochange || (old_count == 1 && Fl::screen_count() == 1)) {
+    // screen sizes did not change or single screen: re-use previous screen scale values
+    for (int screen = 0; screen < old_count; screen++)
+      Fl::screen_driver()->scale(screen, scales[screen]);
+  } else {
+    Fl::screen_driver()->use_startup_scale_factor();
+    float new_scale = Fl::screen_driver()->scale(0);
+    for (int screen = 0; screen < Fl::screen_count(); screen++) {
+      Fl::screen_driver()->scale(screen, 1);
+      Fl::screen_driver()->rescale_all_windows_from_screen(screen, new_scale);
+    }
+  }
+  delete[] scales;
+#endif // USE_XFT
+}
+#endif // USE_XRANDR
+
+#if USE_XFT
+static void after_display_rescale(float *p_current_xft_dpi) {
+  FILE *pipe = popen("xrdb -query", "r");
+  if (!pipe) return;
+  char line[100];
+  while (fgets(line, sizeof(line), pipe) != NULL) {
+    if (memcmp(line, "Xft.dpi:", 8)) continue;
+    float dpi;
+    if (sscanf(line+8, "%f", &dpi) == 1) {
+      //fprintf(stderr," previous=%g dpi=%g \n", *p_current_xft_dpi, dpi);
+      if (fabs(dpi - *p_current_xft_dpi) > 0.01) {
+        *p_current_xft_dpi = dpi;
+        float f = dpi/96.;
+        for (int i = 0; i < Fl::screen_count(); i++)
+          Fl::screen_driver()->rescale_all_windows_from_screen(i, f);
+      }
+    }
+    break;
+  }
+  pclose(pipe);
+}
+#endif // USE_XFT
+
 int fl_handle(const XEvent& thisevent)
 {
   XEvent xevent = thisevent;
@@ -1251,18 +1322,17 @@ int fl_handle(const XEvent& thisevent)
 #if USE_XRANDR  
   if( XRRUpdateConfiguration_f && xevent.type == randrEventBase + RRScreenChangeNotify) {
     XRRUpdateConfiguration_f(&xevent);
-    Fl::call_screen_init();
-#if USE_XFT
-    float factor = Fl::screen_driver()->desktop_scale_factor();
-    for (int screen = 0; screen <= Fl::screen_count(); screen++)
-      Fl::screen_driver()->rescale_all_windows_from_screen(screen, factor);
-#endif // USE_XFT
+    react_to_screen_reconfiguration();
     Fl::handle(FL_SCREEN_CONFIGURATION_CHANGED, NULL);
   }
 #endif // USE_XRANDR
 
   if (xevent.type == PropertyNotify && xevent.xproperty.atom == fl_NET_WORKAREA) {
-    Fl::screen_driver()->init_workarea();
+    Fl_X11_Screen_Driver *d = (Fl_X11_Screen_Driver*)Fl::screen_driver();
+    d->init_workarea();
+#if USE_XFT
+    after_display_rescale(&(d->current_xft_dpi));
+#endif // USE_XFT
   }
   
   switch (xevent.type) {

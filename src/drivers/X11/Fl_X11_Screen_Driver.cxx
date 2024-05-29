@@ -113,31 +113,20 @@ static double missed_timeout_by;
  */
 Fl_Screen_Driver *Fl_Screen_Driver::newScreenDriver()
 {
-#if !USE_XFT
+  Fl_X11_Screen_Driver *d = new Fl_X11_Screen_Driver();
+#if USE_XFT
+  for (int i = 0;  i < MAX_SCREENS; i++) d->screens[i].scale = 1;
+  d->current_xft_dpi = 0.; // means the value of the Xft.dpi resource is still unknown
+#else
   secret_input_character = '*';
 #endif
-  return new Fl_X11_Screen_Driver();
+  return d;
 }
 
 
 void Fl_X11_Screen_Driver::display(const char *d)
 {
-  if (!d) return;
-  
-  static const char *cmd = "DISPLAY=";
-  static const char *ext = ":0.0";
-  int nc = strlen(cmd);
-  int ne = strlen(ext);
-  int nd = strlen(d);
-
-  char *buf = (char *)malloc(nc+ne+nd+1);
-  strcpy(buf, cmd);
-  strcat(buf, d);
-  if (!strchr(d, ':')) {
-    strcat(buf, ext);
-  }
-  putenv(buf);
-  free(buf);
+  if (d) setenv("DISPLAY", d, 1);
 }
 
 
@@ -209,8 +198,6 @@ static int fl_workarea_xywh[4] = { -1, -1, -1, -1 };
 
 void Fl_X11_Screen_Driver::init_workarea() 
 {
-  open_display();
-
   Atom actual;
   unsigned long count, remaining;
   int format;
@@ -227,45 +214,56 @@ void Fl_X11_Screen_Driver::init_workarea()
                          (unsigned char **)&xywh) || !xywh || !xywh[2] ||
                          !xywh[3])
   {
-    Fl::screen_xywh(fl_workarea_xywh[0],
-                    fl_workarea_xywh[1],
-                    fl_workarea_xywh[2],
-                    fl_workarea_xywh[3], 0);
+    fl_workarea_xywh[0] = screens[0].x_org;
+    fl_workarea_xywh[1] = screens[0].y_org;
+    fl_workarea_xywh[2] = screens[0].width;
+    fl_workarea_xywh[3] = screens[0].height;
   }
   else
   {
-#if USE_XFT
-    float s = screens[0].scale;
-#else
-    float s = 1;
-#endif
-    fl_workarea_xywh[0] = xywh[0] / s;
-    fl_workarea_xywh[1] = xywh[1] / s;
-    fl_workarea_xywh[2] = xywh[2] / s;
-    fl_workarea_xywh[3] = xywh[3] / s;
+    fl_workarea_xywh[0] = xywh[0];
+    fl_workarea_xywh[1] = xywh[1];
+    fl_workarea_xywh[2] = xywh[2];
+    fl_workarea_xywh[3] = xywh[3];
   }
   if ( xywh ) { XFree(xywh); xywh = 0; }
 }
 
 
 int Fl_X11_Screen_Driver::x() {
-  if (fl_workarea_xywh[0] < 0) init_workarea();
-  return fl_workarea_xywh[0];
+  if (!fl_display) open_display();
+  return fl_workarea_xywh[0]
+#if USE_XFT
+  / screens[0].scale
+#endif
+  ;
 }
 
 int Fl_X11_Screen_Driver::y() {
-  if (fl_workarea_xywh[0] < 0) init_workarea();
-  return fl_workarea_xywh[1];
+  if (!fl_display) open_display();
+  return fl_workarea_xywh[1]
+#if USE_XFT
+  / screens[0].scale
+#endif
+  ;
 }
 
 int Fl_X11_Screen_Driver::w() {
-  if (fl_workarea_xywh[0] < 0) init_workarea();
-  return fl_workarea_xywh[2];
+  if (!fl_display) open_display();
+  return fl_workarea_xywh[2]
+#if USE_XFT
+      / screens[0].scale
+#endif
+  ;
 }
 
 int Fl_X11_Screen_Driver::h() {
-  if (fl_workarea_xywh[0] < 0) init_workarea();
-  return fl_workarea_xywh[3];
+  if (!fl_display) open_display();
+  return fl_workarea_xywh[3]
+#if USE_XFT
+  / screens[0].scale
+#endif
+  ;
 }
 
 #define USE_XRANDR (HAVE_DLSYM && HAVE_DLFCN_H) // means attempt to dynamically load libXrandr.so
@@ -326,9 +324,6 @@ void Fl_X11_Screen_Driver::init() {
       screens[i].y_org = xsi[i].y_org;
       screens[i].width = xsi[i].width;
       screens[i].height = xsi[i].height;
-#if USE_XFT
-      screens[i].scale = 1;
-#endif
       if (dpi_by_randr) {
 	dpi[i][0] = dpih;
 	dpi[i][1] = dpiv;
@@ -1198,6 +1193,8 @@ int Fl_X11_Screen_Driver::screen_num_unscaled(int x, int y)
   return screen;
 }
 
+
+/*
 #if HAVE_DLSYM && HAVE_DLFCN_H
 
 // returns true when name is among the list of known names
@@ -1208,7 +1205,6 @@ static bool is_name_in_list(const char *name, const char **list) {
   }
   return false;
 }
-
 
 // define types needed for dynamic lib functions
 typedef const char** (*g_settings_list_schemas_ftype)(void);
@@ -1236,8 +1232,10 @@ static void* value_of_key_in_schema(const char **known, const char *schema, cons
     g_object_unref_f(gset);
   }
   return retval;
-}
+}*/
 
+// DEPRECATED: gnome apparently no longer stores the display scale factor value
+// in the gsettings database.
 /*
  returns true under Ubuntu or Debian or FreeBSD and when the gnome scaling value has been found
  
@@ -1248,6 +1246,9 @@ static void* value_of_key_in_schema(const char **known, const char *schema, cons
  gsettings get com.ubuntu.user-interface scale-factor
  Example value: {'VGA-0': 10}
  Its type is "a{si}". This value should be divided by 8 to get the correct scaling factor.
+ 
+ In Ubuntu 18, file $HOME/.config/monitors.xml contains the gnome scaling factor value,
+ and FLTK reads that.
  
  Debian or FreeBSD :
  Change the gnome scaling factor with:
@@ -1286,7 +1287,7 @@ static void* value_of_key_in_schema(const char **known, const char *schema, cons
                                             org.gnome.settings-daemon.plugins.xsettings overrides
  =================================================================================================
  */
-static bool gnome_scale_factor(float& factor) {
+/*static bool gnome_scale_factor(float& factor) {
   // open dynamic libs
   void *glib = dlopen("libglib-2.0.so", RTLD_LAZY);
   void *gio = dlopen("libgio-2.0.so", RTLD_LAZY);
@@ -1391,15 +1392,22 @@ static bool gnome_scale_factor(float& factor) {
   return true;
 }
 #endif // HAVE_DLSYM && HAVE_DLFCN_H
+*/
 
-
-// return the desktop's default scaling value
+// set the desktop's default scaling value
 float Fl_X11_Screen_Driver::desktop_scale_factor()
 {
   float factor = 1;
-#if HAVE_DLSYM && HAVE_DLFCN_H
-  gnome_scale_factor(factor);
-#endif
+  if (this->current_xft_dpi == 0.) { // Try getting the Xft.dpi resource value
+    char *s = XGetDefault(fl_display, "Xft", "dpi");
+    if (s && sscanf(s, "%f", &(this->current_xft_dpi)) == 1) {
+      float factor = this->current_xft_dpi / 96.;
+      // checks to prevent potential crash (factor <= 0) or very large factors
+      if (factor < 0.25) factor = 0.25;
+      else if (factor > 10.0) factor = 10.0;
+      for (int i = 0; i < screen_count(); i++)  scale(i, factor);
+    }
+  }
   return factor;
 }
 
